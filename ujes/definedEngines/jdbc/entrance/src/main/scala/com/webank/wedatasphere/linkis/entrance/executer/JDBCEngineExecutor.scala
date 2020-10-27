@@ -55,66 +55,70 @@ class JDBCEngineExecutor(outputPrintLimit: Int, properties: util.HashMap[String,
     val realCode = code.trim()
     LOG.info(s"jdbc client begins to run jdbc code:\n ${realCode.trim}")
     connection = connectionManager.getConnection(properties)
-    statement = connection.createStatement()
-    LOG.info(s"create statement is:  $statement")
-    val isResultSetAvailable = statement.execute(code)
-    LOG.info(s"Is ResultSet available ? : $isResultSetAvailable")
-    if(isResultSetAvailable){
-      LOG.info("ResultSet is available")
-      val JDBCResultSet = statement.getResultSet
-      if(isDDLCommand(statement.getUpdateCount(),JDBCResultSet.getMetaData().getColumnCount)){
-        LOG.info(s"current result is a ResultSet Object , but there are no more results :${code} ")
-        Utils.tryQuietly {
-          JDBCResultSet.close()
-          statement.close()
-          connection.close()
-        }
-        return SuccessExecuteResponse()
-      }else{
-        val md = JDBCResultSet.getMetaData
-        val metaArrayBuffer = new ArrayBuffer[Tuple2[String, String]]()
-        for (i <- 1 to md.getColumnCount) {
-          metaArrayBuffer.add(Tuple2(md.getColumnName(i), JDBCHelper.getTypeStr(md.getColumnType(i))))
-        }
-        val columns = metaArrayBuffer.map { c => Column(c._1, DataType.toDataType(c._2), "") }.toArray[Column]
-        val metaData = new TableMetaData(columns)
-        val resultSet = ResultSetFactory.getInstance.getResultSetByType(ResultSetFactory.TABLE_TYPE)
-        val resultSetPath = resultSet.getResultSetPath(new FsPath(storePath), alias)
-        val resultSetWriter = ResultSetWriter.getResultSetWriter(resultSet, ENGINE_RESULT_SET_MAX_CACHE.getValue.toLong, resultSetPath)
-        resultSetWriter.addMetaData(metaData)
-        var count = 0
-        Utils.tryCatch({
-          while (count < outputPrintLimit && JDBCResultSet.next()) {
-            val r: Array[Any] = columns.indices.map { i =>
-              val data = JDBCResultSet.getObject(i + 1) match {
-                case value: Any => value.toString
-                case _ => null
+    Utils.tryFinally {
+      statement = connection.createStatement()
+      Utils.tryFinally {
+        LOG.info(s"create statement is:  $statement")
+        val isResultSetAvailable = statement.execute(code)
+        LOG.info(s"Is ResultSet available ? : $isResultSetAvailable")
+        if(isResultSetAvailable){
+          LOG.info("ResultSet is available")
+          val JDBCResultSet = statement.getResultSet
+          if(isDDLCommand(statement.getUpdateCount(),JDBCResultSet.getMetaData().getColumnCount)){
+            LOG.info(s"current result is a ResultSet Object , but there are no more results :${code} ")
+            Utils.tryQuietly {
+              JDBCResultSet.close()
+              statement.close()
+              connection.close()
+            }
+            return SuccessExecuteResponse()
+          }else{
+            val md = JDBCResultSet.getMetaData
+            val metaArrayBuffer = new ArrayBuffer[Tuple2[String, String]]()
+            for (i <- 1 to md.getColumnCount) {
+              metaArrayBuffer.add(Tuple2(md.getColumnName(i), JDBCHelper.getTypeStr(md.getColumnType(i))))
+            }
+            val columns = metaArrayBuffer.map { c => Column(c._1, DataType.toDataType(c._2), "") }.toArray[Column]
+            val metaData = new TableMetaData(columns)
+            val resultSet = ResultSetFactory.getInstance.getResultSetByType(ResultSetFactory.TABLE_TYPE)
+            val resultSetPath = resultSet.getResultSetPath(new FsPath(storePath), alias)
+            val resultSetWriter = ResultSetWriter.getResultSetWriter(resultSet, ENGINE_RESULT_SET_MAX_CACHE.getValue.toLong, resultSetPath)
+            resultSetWriter.addMetaData(metaData)
+            var count = 0
+            Utils.tryCatch({
+              while (count < outputPrintLimit && JDBCResultSet.next()) {
+                val r: Array[Any] = columns.indices.map { i =>
+                  val data = JDBCResultSet.getObject(i + 1) match {
+                    case value: Any => value.toString
+                    case _ => null
+                  }
+                  data
+                }.toArray
+                resultSetWriter.addRecord(new TableRecord(r))
+                count += 1
               }
-              data
-            }.toArray
-            resultSetWriter.addRecord(new TableRecord(r))
-            count += 1
+            }) {
+              case e: Exception => return ErrorExecuteResponse("query jdbc failed", e)
+            }
+            val output = if (resultSetWriter != null) resultSetWriter.toString else null
+            Utils.tryQuietly {
+              JDBCResultSet.close()
+              statement.close()
+              connection.close()
+            }
+            LOG.info("sql execute completed")
+            AliasOutputExecuteResponse(alias, output)
           }
-        }) {
-          case e: Exception => return ErrorExecuteResponse("query jdbc failed", e)
+        }else{
+          LOG.info(s"only return affect rows : ${statement.getUpdateCount}")
+          Utils.tryQuietly{
+            statement.close()
+            connection.close()
+          }
+          return SuccessExecuteResponse()
         }
-        val output = if (resultSetWriter != null) resultSetWriter.toString else null
-        Utils.tryQuietly {
-          JDBCResultSet.close()
-          statement.close()
-          connection.close()
-        }
-        LOG.info("sql execute completed")
-        AliasOutputExecuteResponse(alias, output)
-      }
-    }else{
-      LOG.info(s"only return affect rows : ${statement.getUpdateCount}")
-      Utils.tryQuietly{
-        statement.close()
-        connection.close()
-      }
-      return SuccessExecuteResponse()
-    }
+      }(Utils.tryQuietly(statement.close()))
+    }(Utils.tryQuietly(connection.close()))
   }
 
 
